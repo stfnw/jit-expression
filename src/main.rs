@@ -347,11 +347,19 @@ struct Jit {
     code: Vec<u8>,
 }
 
-// TODO implement better hexdump; add linebreaks
 impl fmt::Display for Jit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for b in &self.code {
-            write!(f, "\\x{:02x}", b)?;
+        for (i, b) in self.code.iter().enumerate() {
+            if i % 0x10 == 0 && i != 0 {
+                writeln!(f)?;
+            }
+            if i % 0x10 == 0 {
+                write!(f, "0x{:010x}:", i)?;
+            }
+            if i % 0x08 == 0 {
+                write!(f, " ")?;
+            }
+            write!(f, "{:02x} ", b)?;
         }
         Ok(())
     }
