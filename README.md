@@ -1,5 +1,5 @@
 This is a small demo project that implements a simple JIT for evaluating arithmetic expressions.
-It assuments it is running under Linux on x86_64.
+It assumes it is running under Linux on x86_64.
 It uses 64 bit signed numbers and supports integer addition, subtraction, multiplication and division.
 
 # How to build and run
