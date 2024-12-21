@@ -33,7 +33,8 @@ fn eval_and_jit(ast: Ast) {
         println!("AST: {}", ast);
         println!("res_interpreter: {}", res_interpreter);
         let jitcode = jit(ast);
-        println!("JIT CODE: {}", jitcode);
+        println!("JIT CODE:");
+        println!("{}", jitcode);
         let res_jit = run_jit(&jitcode);
         println!("res_jit:         {}", res_jit);
 
