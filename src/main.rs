@@ -90,7 +90,7 @@ fn lex(expr: &str) -> Result<Vec<Token>, LexError> {
                 }
             }
 
-            c if c.is_digit(10) => {
+            c if c.is_ascii_digit() => {
                 let mut val: Num = 0;
                 while let Some(d) = expr.chars().nth(i).unwrap().to_digit(10) {
                     val *= 10;
@@ -222,8 +222,8 @@ fn parse(tokens: Vec<Token>) -> Result<Ast, ParseError> {
 fn parse_expr(tokens: &[Token]) -> Result<(Ast, &[Token]), ParseError> {
     let (mut op1, mut tokens) = parse_term(tokens)?;
 
-    while tokens.get(0) == Some(&Token::Plus) || tokens.get(0) == Some(&Token::Minus) {
-        let binop = if tokens.get(0) == Some(&Token::Plus) {
+    while tokens.first() == Some(&Token::Plus) || tokens.first() == Some(&Token::Minus) {
+        let binop = if tokens.first() == Some(&Token::Plus) {
             BinOp::Add
         } else {
             BinOp::Sub
@@ -241,8 +241,8 @@ fn parse_expr(tokens: &[Token]) -> Result<(Ast, &[Token]), ParseError> {
 fn parse_term(tokens: &[Token]) -> Result<(Ast, &[Token]), ParseError> {
     let (mut op1, mut tokens) = parse_factor(tokens)?;
 
-    while tokens.get(0) == Some(&Token::Mul) || tokens.get(0) == Some(&Token::Div) {
-        let binop = if tokens.get(0) == Some(&Token::Mul) {
+    while tokens.first() == Some(&Token::Mul) || tokens.first() == Some(&Token::Div) {
+        let binop = if tokens.first() == Some(&Token::Mul) {
             BinOp::Mul
         } else {
             BinOp::Div
@@ -258,16 +258,13 @@ fn parse_term(tokens: &[Token]) -> Result<(Ast, &[Token]), ParseError> {
 
 /// Parse numbers, unary minus or groupings of paranthesis.
 fn parse_factor(tokens: &[Token]) -> Result<(Ast, &[Token]), ParseError> {
-    match tokens.get(0) {
+    match tokens.first() {
         Some(t) => match t {
             Token::Num(_) | Token::Minus => {
                 let mut sign = 1;
                 let mut i = 0;
-                loop {
-                    match tokens.get(i) {
-                        Some(Token::Minus) => sign *= -1,
-                        _ => break,
-                    }
+                while let Some(Token::Minus) = tokens.get(i) {
+                    sign *= -1;
                     i += 1;
                 }
 
@@ -280,7 +277,7 @@ fn parse_factor(tokens: &[Token]) -> Result<(Ast, &[Token]), ParseError> {
 
             Token::LParen => {
                 let (ast, tokens) = parse_expr(&tokens[1..])?;
-                match tokens.get(0) {
+                match tokens.first() {
                     Some(Token::RParen) => Ok((ast, &tokens[1..])),
                     Some(_) => Err(ParseError::UnbalancedParanthesis),
                     None => Err(ParseError::UnexpectedEOF),
