@@ -1,6 +1,10 @@
 use std::ffi;
 use std::fmt;
 
+/*******************************************************************************
+ * Main. ***********************************************************************
+ ******************************************************************************/
+
 fn main() {
     // Read expression from commandline.
     let args: Vec<String> = std::env::args().collect();
@@ -15,6 +19,39 @@ fn main() {
     let ast = parse(&args[1]);
     eval_and_jit(ast);
 }
+
+/// Evaluate the given expression syntax tree; once by jitting it down to
+/// assembly, once by walking the AST and interpreting it.
+/// Finally, both results are asserted to be equal with each other.
+fn eval_and_jit(ast: Ast) {
+    if let Some(res_interpreter) = eval(&ast) {
+        // Only perform further actions (including JIT) if there were no
+        // arithmetic errors during interpretation.
+        println!("AST: {}", ast);
+        println!("res_interpreter: {}", res_interpreter);
+        let jitcode = jit(ast);
+        println!("JIT CODE: {}", jitcode);
+        let res_jit = run_jit(&jitcode);
+        println!("res_jit:         {}", res_jit);
+
+        assert_eq!(res_interpreter, res_jit);
+    } else {
+        println!("Arithmetic error occurred (bounds over/underflow, divide by zero, etc.)!");
+    }
+}
+
+/*******************************************************************************
+ * Lexing. *********************************************************************
+ ******************************************************************************/
+
+/// Tokenize an expression string.
+fn lex(expr: &str) -> Vec<&str> {
+    expr.split_whitespace().collect()
+}
+
+/*******************************************************************************
+ * Parsing. ********************************************************************
+ ******************************************************************************/
 
 /// (Abstract) syntax tree of arithmetic expressions.
 enum Ast {
@@ -42,38 +79,13 @@ enum AstVal {
     Op(String),
 }
 
-/// Jitted code (native x86_64).
-struct Jit {
-    code: Vec<u8>,
-}
-
-// TODO implement better hexdump; add linebreaks
-impl fmt::Display for Jit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for b in &self.code {
-            write!(f, "\\x{:02x}", b)?;
-        }
-        Ok(())
-    }
-}
-
-/// Evaluate the given expression syntax tree; once by jitting it down to
-/// assembly, once by walking the AST and interpreting it.
-/// Finally, both results are asserted to be equal with each other.
-fn eval_and_jit(ast: Ast) {
-    if let Some(res_interpreter) = eval(&ast) {
-        // Only perform further actions (including JIT) if there were no
-        // arithmetic errors during interpretation.
-        println!("AST: {}", ast);
-        println!("res_interpreter: {}", res_interpreter);
-        let jitcode = jit(ast);
-        println!("JIT CODE: {}", jitcode);
-        let res_jit = run_jit(&jitcode);
-        println!("res_jit:         {}", res_jit);
-
-        assert_eq!(res_interpreter, res_jit);
+/// Compare the current token against an expected one; if it matches, consume
+/// the current token; if not, panic.
+fn expect(tokens: &Vec<&str>, i: &mut usize, t: &str) {
+    if tokens[*i] == t {
+        *i += 1;
     } else {
-        println!("Arithmetic error occurred (bounds over/underflow, divide by zero, etc.)!");
+        panic!("Unexpected token {} != {}", tokens[*i], t);
     }
 }
 
@@ -111,18 +123,69 @@ fn parse_(tokens: &Vec<&str>, i: &mut usize) -> Ast {
     }
 }
 
-/// Tokenize an expression string.
-fn lex(expr: &str) -> Vec<&str> {
-    expr.split_whitespace().collect()
+/*******************************************************************************
+ * Helper functions for walkint the AST. ***************************************
+ ******************************************************************************/
+
+/// Traverse the syntax tree [ast] in post-order (recursively).
+/// Return a list of the nodes in post-order / reverse polish notation.
+#[allow(dead_code)]
+fn post_order_traverse(ast: &Ast) -> Vec<AstVal> {
+    let mut res = Vec::new();
+    post_order_traverse_(ast, &mut res);
+    res
 }
 
-/// Compare the current token against an expected one; if it matches, consume
-/// the current token; if not, panic.
-fn expect(tokens: &Vec<&str>, i: &mut usize, t: &str) {
-    if tokens[*i] == t {
-        *i += 1;
-    } else {
-        panic!("Unexpected token {} != {}", tokens[*i], t);
+#[allow(dead_code)]
+fn post_order_traverse_(ast: &Ast, acc: &mut Vec<AstVal>) {
+    match ast {
+        Ast::Num(n) => acc.push(AstVal::Num(*n)),
+        Ast::BinOp(s, a, b) => {
+            post_order_traverse_(a, acc);
+            post_order_traverse_(b, acc);
+            acc.push(AstVal::Op(s.clone()));
+        }
+    }
+}
+
+/// Traverse the syntax tree [ast] in post-order (iteratively).
+/// Return a list of the nodes in post-order / reverse polish notation.
+fn post_order_traverse_iterative(ast: &Ast) -> Vec<AstVal> {
+    let mut tmp = vec![ast]; //      temporary stack
+    let mut res_rev = Vec::new(); // reverse post-order traversal
+
+    while let Some(node) = tmp.pop() {
+        match node {
+            Ast::Num(n) => res_rev.push(AstVal::Num(*n)),
+            Ast::BinOp(s, a, b) => {
+                res_rev.push(AstVal::Op(s.clone()));
+
+                // push all children
+                tmp.push(a);
+                tmp.push(b);
+            }
+        }
+    }
+
+    res_rev.into_iter().rev().collect()
+}
+
+/*******************************************************************************
+ * JITting. ********************************************************************
+ ******************************************************************************/
+
+/// Jitted code (native x86_64).
+struct Jit {
+    code: Vec<u8>,
+}
+
+// TODO implement better hexdump; add linebreaks
+impl fmt::Display for Jit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for b in &self.code {
+            write!(f, "\\x{:02x}", b)?;
+        }
+        Ok(())
     }
 }
 
@@ -190,80 +253,6 @@ fn jit_apply_op(code: &mut Vec<u8>, op: &str) {
     code.push(0x50); // push rax
 }
 
-/// Evaluate given AST based on reverse-polish notation / post-order traversal
-/// stack machine interpreter.
-fn eval(ast: &Ast) -> Option<i64> {
-    // let post_order = post_order_traverse(ast);
-    let post_order = post_order_traverse_iterative(ast);
-
-    let mut stack = Vec::new();
-    for po in post_order.into_iter() {
-        match po {
-            AstVal::Num(n) => stack.push(n),
-            AstVal::Op(name) => {
-                let b = stack.pop().unwrap();
-                let a = stack.pop().unwrap();
-                stack.push(match name.as_str() {
-                    "+" => a.checked_add(b)?,
-                    "-" => a.checked_sub(b)?,
-                    "*" => a.checked_mul(b)?,
-                    "/" => a.checked_div(b)?,
-                    _ => panic!("Unknown operator {}", name),
-                });
-            }
-        }
-    }
-
-    if stack.len() != 1 {
-        panic!("Error");
-    }
-
-    Some(stack.pop().unwrap())
-}
-
-/// Traverse the syntax tree [ast] in post-order (recursively).
-/// Return a list of the nodes in post-order / reverse polish notation.
-#[allow(dead_code)]
-fn post_order_traverse(ast: &Ast) -> Vec<AstVal> {
-    let mut res = Vec::new();
-    post_order_traverse_(ast, &mut res);
-    res
-}
-
-#[allow(dead_code)]
-fn post_order_traverse_(ast: &Ast, acc: &mut Vec<AstVal>) {
-    match ast {
-        Ast::Num(n) => acc.push(AstVal::Num(*n)),
-        Ast::BinOp(s, a, b) => {
-            post_order_traverse_(a, acc);
-            post_order_traverse_(b, acc);
-            acc.push(AstVal::Op(s.clone()));
-        }
-    }
-}
-
-/// Traverse the syntax tree [ast] in post-order (iteratively).
-/// Return a list of the nodes in post-order / reverse polish notation.
-fn post_order_traverse_iterative(ast: &Ast) -> Vec<AstVal> {
-    let mut tmp = vec![ast]; //      temporary stack
-    let mut res_rev = Vec::new(); // reverse post-order traversal
-
-    while let Some(node) = tmp.pop() {
-        match node {
-            Ast::Num(n) => res_rev.push(AstVal::Num(*n)),
-            Ast::BinOp(s, a, b) => {
-                res_rev.push(AstVal::Op(s.clone()));
-
-                // push all children
-                tmp.push(a);
-                tmp.push(b);
-            }
-        }
-    }
-
-    res_rev.into_iter().rev().collect()
-}
-
 // C ffi function definitions needed for the JIT (dynamically marking memory as
 // executable).
 extern "C" {
@@ -309,6 +298,45 @@ fn run_jit(jit: &Jit) -> i64 {
     let func: extern "C" fn() -> i64 = unsafe { std::mem::transmute(mem) };
     func()
 }
+
+/*******************************************************************************
+ * Interpreting. ***************************************************************
+ ******************************************************************************/
+
+/// Evaluate given AST based on reverse-polish notation / post-order traversal
+/// stack machine interpreter.
+fn eval(ast: &Ast) -> Option<i64> {
+    // let post_order = post_order_traverse(ast);
+    let post_order = post_order_traverse_iterative(ast);
+
+    let mut stack = Vec::new();
+    for po in post_order.into_iter() {
+        match po {
+            AstVal::Num(n) => stack.push(n),
+            AstVal::Op(name) => {
+                let b = stack.pop().unwrap();
+                let a = stack.pop().unwrap();
+                stack.push(match name.as_str() {
+                    "+" => a.checked_add(b)?,
+                    "-" => a.checked_sub(b)?,
+                    "*" => a.checked_mul(b)?,
+                    "/" => a.checked_div(b)?,
+                    _ => panic!("Unknown operator {}", name),
+                });
+            }
+        }
+    }
+
+    if stack.len() != 1 {
+        panic!("Error");
+    }
+
+    Some(stack.pop().unwrap())
+}
+
+/*******************************************************************************
+ * Testing. ********************************************************************
+ ******************************************************************************/
 
 #[cfg(test)]
 mod tests {
