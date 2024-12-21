@@ -8,12 +8,19 @@ Provide the expression to be evaluated on the commandline like so:
 
 ```
 $ cargo run "2+3 *4 + 10/5 - 6*(9+7)"
-   Compiling jit-expression-eval v0.1.0 (jit-expression)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.39s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
      Running `target/debug/jit-expression-eval '2+3 *4 + 10/5 - 6*(9+7)'`
 AST: (((2 + (3 * 4)) + (10 / 5)) - (6 * (9 + 7)))
 res_interpreter: -80
-JIT CODE: \x55\x48\x89\xe5\x53\x48\xb8\x02\x00\x00\x00\x00\x00\x00\x00\x50\x48\xb8\x03\x00\x00\x00\x00\x00\x00\x00\x50\x48\xb8\x04\x00\x00\x00\x00\x00\x00\x00\x50\x5b\x58\x48\xf7\xeb\x50\x5b\x58\x48\x01\xd8\x50\x48\xb8\x0a\x00\x00\x00\x00\x00\x00\x00\x50\x48\xb8\x05\x00\x00\x00\x00\x00\x00\x00\x50\x5b\x58\x48\x99\x48\xf7\xfb\x50\x5b\x58\x48\x01\xd8\x50\x48\xb8\x06\x00\x00\x00\x00\x00\x00\x00\x50\x48\xb8\x09\x00\x00\x00\x00\x00\x00\x00\x50\x48\xb8\x07\x00\x00\x00\x00\x00\x00\x00\x50\x5b\x58\x48\x01\xd8\x50\x5b\x58\x48\xf7\xeb\x50\x5b\x58\x48\x29\xd8\x50\x58\x5b\x5d\xc3
+JIT CODE: 0x0000000000: 55 48 89 e5 53 48 b8 02  00 00 00 00 00 00 00 50 
+0x0000000010: 48 b8 03 00 00 00 00 00  00 00 50 48 b8 04 00 00 
+0x0000000020: 00 00 00 00 00 50 5b 58  48 f7 eb 50 5b 58 48 01 
+0x0000000030: d8 50 48 b8 0a 00 00 00  00 00 00 00 50 48 b8 05 
+0x0000000040: 00 00 00 00 00 00 00 50  5b 58 48 99 48 f7 fb 50 
+0x0000000050: 5b 58 48 01 d8 50 48 b8  06 00 00 00 00 00 00 00 
+0x0000000060: 50 48 b8 09 00 00 00 00  00 00 00 50 48 b8 07 00 
+0x0000000070: 00 00 00 00 00 00 50 5b  58 48 01 d8 50 5b 58 48 
+0x0000000080: f7 eb 50 5b 58 48 29 d8  50 58 5b 5d c3 
 res_jit:         -80
 ```
 
