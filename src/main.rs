@@ -1,3 +1,4 @@
+use std::error;
 use std::ffi;
 use std::fmt;
 
@@ -5,7 +6,7 @@ use std::fmt;
  * Main. ***********************************************************************
  ******************************************************************************/
 
-fn main() {
+fn main() -> Result<(), Box<dyn error::Error>> {
     // Read expression from commandline.
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 2 {
@@ -14,10 +15,12 @@ fn main() {
             std::env::current_exe().unwrap().display()
         );
     }
-    // e.g. "( ( ( 2 + 3 ) * 4 ) + ( 10 / 5 ) )"
 
-    let ast = parse(&args[1]);
+    let tokens = lex(&args[1])?;
+    let ast = parse(tokens)?;
     eval_and_jit(ast);
+
+    Ok(())
 }
 
 /// Evaluate the given expression syntax tree; once by jitting it down to
@@ -40,13 +43,93 @@ fn eval_and_jit(ast: Ast) {
     }
 }
 
+/// Our calculator works with signed 64 bit numbers only.
+type Num = i64;
+
 /*******************************************************************************
  * Lexing. *********************************************************************
  ******************************************************************************/
 
+#[derive(Debug)]
+#[allow(dead_code)]
+enum LexError {
+    UnexpectedChar(char),
+}
+
+impl fmt::Display for LexError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl error::Error for LexError {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Token {
+    Num(Num),
+    Plus,
+    Minus,
+    Mul,
+    Div,
+    LParen,
+    RParen,
+}
+
 /// Tokenize an expression string.
-fn lex(expr: &str) -> Vec<&str> {
-    expr.split_whitespace().collect()
+fn lex(expr: &str) -> Result<Vec<Token>, LexError> {
+    let mut tokens = Vec::new();
+    let n = expr.chars().count();
+
+    let mut i = 0;
+    while i < n {
+        match expr.chars().nth(i).unwrap() {
+            ' ' => {
+                // Skip whitespace without emitting a token.
+                while i < n && expr.chars().nth(i).unwrap() == ' ' {
+                    i += 1;
+                }
+            }
+
+            c if c.is_digit(10) => {
+                let mut val: Num = 0;
+                while let Some(d) = expr.chars().nth(i).unwrap().to_digit(10) {
+                    val *= 10;
+                    val += d as Num;
+                    i += 1;
+                }
+                tokens.push(Token::Num(val));
+            }
+
+            '+' => {
+                tokens.push(Token::Plus);
+                i += 1;
+            }
+            '-' => {
+                tokens.push(Token::Minus);
+                i += 1;
+            }
+            '*' => {
+                tokens.push(Token::Mul);
+                i += 1;
+            }
+            '/' => {
+                tokens.push(Token::Div);
+                i += 1;
+            }
+            '(' => {
+                tokens.push(Token::LParen);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token::RParen);
+                i += 1;
+            }
+
+            c => return Err(LexError::UnexpectedChar(c)),
+        }
+    }
+
+    Ok(tokens)
 }
 
 /*******************************************************************************
@@ -54,9 +137,10 @@ fn lex(expr: &str) -> Vec<&str> {
  ******************************************************************************/
 
 /// (Abstract) syntax tree of arithmetic expressions.
+#[derive(Debug)]
 enum Ast {
-    Num(i64),
-    BinOp(String, Box<Ast>, Box<Ast>),
+    Num(Num),
+    BinOp(BinOp, Box<Ast>, Box<Ast>),
 }
 
 impl fmt::Display for Ast {
@@ -68,6 +152,25 @@ impl fmt::Display for Ast {
     }
 }
 
+#[derive(Clone, Debug)]
+enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl fmt::Display for BinOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BinOp::Add => write!(f, "+"),
+            BinOp::Sub => write!(f, "-"),
+            BinOp::Mul => write!(f, "*"),
+            BinOp::Div => write!(f, "/"),
+        }
+    }
+}
+
 /// AST node without references to other nodes (that is, this struct contains
 /// only the valuess associated with each node). This is used during
 /// interpretation/evaluation of the expression through a stack machine after
@@ -75,51 +178,119 @@ impl fmt::Display for Ast {
 /// notation.
 #[derive(Debug)]
 enum AstVal {
-    Num(i64),
-    Op(String),
+    Num(Num),
+    BinOp(BinOp),
 }
 
-/// Compare the current token against an expected one; if it matches, consume
-/// the current token; if not, panic.
-fn expect(tokens: &Vec<&str>, i: &mut usize, t: &str) {
-    if tokens[*i] == t {
-        *i += 1;
-    } else {
-        panic!("Unexpected token {} != {}", tokens[*i], t);
+#[derive(Debug)]
+#[allow(dead_code)]
+enum ParseError {
+    UnconsumdedInput(Vec<Token>),
+    UnexpectedEOF,
+    NoNumAfterUnaryMinus,
+    UnbalancedParanthesis,
+    UnexpectedToken(Token),
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 
-/// Parse an arithmetic expression into its (abstract) syntax tree.
-/// AST := NUM | (AST + AST) | (AST - AST) | (AST * AST) | (AST / AST)
-/// Note: paranthesis are *not* optional. This lexer/parser is very dumb!
-/// TODO make lexer and parser less dumb
-fn parse(expr: &str) -> Ast {
-    let expr = expr.replace("(", " ( ").replace(")", " ) ");
-    let tokens = lex(&expr);
-    let mut pos = 0;
-    parse_(&tokens, &mut pos)
+impl error::Error for ParseError {}
+
+/// Parse an arithmetic expression into its (abstract) syntax tree using a
+/// recurisve descent parser. All intermediate parse functions return a result
+/// of a tuple of the currently parsed AST, and a slice of the rest of the yet
+/// unparsed token stream. This parser supports operator precedence and grouping
+/// in theh following order (from strong to weak):
+///   ()    (parenthesis)
+///   -     (unary minus)
+///   + -   (addition/subtraction)
+///   * /   (multiplication/division)
+fn parse(tokens: Vec<Token>) -> Result<Ast, ParseError> {
+    let (ast, rest) = parse_expr(&tokens[..])?;
+    if !rest.is_empty() {
+        Err(ParseError::UnconsumdedInput(rest.to_vec()))
+    } else {
+        Ok(ast)
+    }
 }
 
-/// Actual recursive descent parser.
-fn parse_(tokens: &Vec<&str>, i: &mut usize) -> Ast {
-    match tokens[*i] {
-        "(" => {
-            expect(tokens, i, "(");
-            let a = parse_(tokens, i);
-            let op = tokens[*i];
-            *i += 1;
-            let b = parse_(tokens, i);
-            expect(tokens, i, ")");
-            match op {
-                "+" | "-" | "*" | "/" => Ast::BinOp(op.to_string(), Box::new(a), Box::new(b)),
-                _ => panic!("Unexpected operator: {}", op),
+/// Parse additions / subtractions.
+fn parse_expr(tokens: &[Token]) -> Result<(Ast, &[Token]), ParseError> {
+    let (mut op1, mut tokens) = parse_term(tokens)?;
+
+    while tokens.get(0) == Some(&Token::Plus) || tokens.get(0) == Some(&Token::Minus) {
+        let binop = if tokens.get(0) == Some(&Token::Plus) {
+            BinOp::Add
+        } else {
+            BinOp::Sub
+        };
+        let tmp = parse_term(&tokens[1..])?;
+        let op2 = tmp.0;
+        tokens = tmp.1;
+        op1 = Ast::BinOp(binop, Box::new(op1), Box::new(op2));
+    }
+
+    Ok((op1, tokens))
+}
+
+/// Parse multiplications / division.
+fn parse_term(tokens: &[Token]) -> Result<(Ast, &[Token]), ParseError> {
+    let (mut op1, mut tokens) = parse_factor(tokens)?;
+
+    while tokens.get(0) == Some(&Token::Mul) || tokens.get(0) == Some(&Token::Div) {
+        let binop = if tokens.get(0) == Some(&Token::Mul) {
+            BinOp::Mul
+        } else {
+            BinOp::Div
+        };
+        let tmp = parse_factor(&tokens[1..])?;
+        let op2 = tmp.0;
+        tokens = tmp.1;
+        op1 = Ast::BinOp(binop, Box::new(op1), Box::new(op2));
+    }
+
+    Ok((op1, tokens))
+}
+
+/// Parse numbers, unary minus or groupings of paranthesis.
+fn parse_factor(tokens: &[Token]) -> Result<(Ast, &[Token]), ParseError> {
+    match tokens.get(0) {
+        Some(t) => match t {
+            Token::Num(_) | Token::Minus => {
+                let mut sign = 1;
+                let mut i = 0;
+                loop {
+                    match tokens.get(i) {
+                        Some(Token::Minus) => sign *= -1,
+                        _ => break,
+                    }
+                    i += 1;
+                }
+
+                match tokens.get(i) {
+                    Some(Token::Num(n)) => Ok((Ast::Num(sign * n), &tokens[(i + 1)..])),
+                    Some(_) => Err(ParseError::NoNumAfterUnaryMinus),
+                    None => Err(ParseError::UnexpectedEOF),
+                }
             }
-        }
-        n => {
-            *i += 1;
-            let num = n.parse::<i64>().unwrap();
-            Ast::Num(num)
-        }
+
+            Token::LParen => {
+                let (ast, tokens) = parse_expr(&tokens[1..])?;
+                match tokens.get(0) {
+                    Some(Token::RParen) => Ok((ast, &tokens[1..])),
+                    Some(_) => Err(ParseError::UnbalancedParanthesis),
+                    None => Err(ParseError::UnexpectedEOF),
+                }
+            }
+
+            _ => Err(ParseError::UnexpectedToken(t.clone())),
+        },
+
+        None => Err(ParseError::UnexpectedEOF),
     }
 }
 
@@ -143,7 +314,7 @@ fn post_order_traverse_(ast: &Ast, acc: &mut Vec<AstVal>) {
         Ast::BinOp(s, a, b) => {
             post_order_traverse_(a, acc);
             post_order_traverse_(b, acc);
-            acc.push(AstVal::Op(s.clone()));
+            acc.push(AstVal::BinOp(s.clone()));
         }
     }
 }
@@ -158,7 +329,7 @@ fn post_order_traverse_iterative(ast: &Ast) -> Vec<AstVal> {
         match node {
             Ast::Num(n) => res_rev.push(AstVal::Num(*n)),
             Ast::BinOp(s, a, b) => {
-                res_rev.push(AstVal::Op(s.clone()));
+                res_rev.push(AstVal::BinOp(s.clone()));
 
                 // push all children
                 tmp.push(a);
@@ -219,7 +390,7 @@ fn jit_(code: &mut Vec<u8>, ast: Ast) {
     for po in post_order.into_iter() {
         match po {
             AstVal::Num(n) => jit_push(code, n),
-            AstVal::Op(name) => jit_apply_op(code, name.as_str()),
+            AstVal::BinOp(op) => jit_apply_op(code, op),
         }
     }
 
@@ -228,7 +399,7 @@ fn jit_(code: &mut Vec<u8>, ast: Ast) {
 }
 
 /// Push a 64 bit immediate value to the stack (via rax).
-fn jit_push(code: &mut Vec<u8>, n: i64) {
+fn jit_push(code: &mut Vec<u8>, n: Num) {
     // mov rax, n
     code.extend([0x48, 0xb8]);
     code.extend(n.to_le_bytes());
@@ -239,15 +410,14 @@ fn jit_push(code: &mut Vec<u8>, n: i64) {
 
 /// Pop the two top-most items off of the stack, apply the specified binary
 /// operator to them, and push the result back to the stack.
-fn jit_apply_op(code: &mut Vec<u8>, op: &str) {
+fn jit_apply_op(code: &mut Vec<u8>, op: BinOp) {
     code.push(0x5b); // pop rbx
     code.push(0x58); // pop rax
     match op {
-        "+" => code.extend([0x48, 0x01, 0xd8]), //              add rax, rbx
-        "-" => code.extend([0x48, 0x29, 0xd8]), //              sub rax, rbx
-        "*" => code.extend([0x48, 0xf7, 0xeb]), //              imul rbx
-        "/" => code.extend([0x48, 0x99, 0x48, 0xf7, 0xfb]), //  cqo (sign extend); idiv rbx
-        _ => panic!("Unknown operator {}", op),
+        BinOp::Add => code.extend([0x48, 0x01, 0xd8]), //              add rax, rbx
+        BinOp::Sub => code.extend([0x48, 0x29, 0xd8]), //              sub rax, rbx
+        BinOp::Mul => code.extend([0x48, 0xf7, 0xeb]), //              imul rbx
+        BinOp::Div => code.extend([0x48, 0x99, 0x48, 0xf7, 0xfb]), //  cqo (sign extend); idiv rbx
     }
     // result is now always in rax
     code.push(0x50); // push rax
@@ -276,7 +446,7 @@ const MAP_ANON: i32 = 0x0020;
 const MAP_PRIVATE: i32 = 0x0002;
 
 /// Run the provided jitted code.
-fn run_jit(jit: &Jit) -> i64 {
+fn run_jit(jit: &Jit) -> Num {
     // Allocate rwx memory.
     let mem = unsafe {
         mmap(
@@ -295,7 +465,7 @@ fn run_jit(jit: &Jit) -> i64 {
     }
 
     // Cast rwx buffer as function pointer and call it.
-    let func: extern "C" fn() -> i64 = unsafe { std::mem::transmute(mem) };
+    let func: extern "C" fn() -> Num = unsafe { std::mem::transmute(mem) };
     func()
 }
 
@@ -305,7 +475,7 @@ fn run_jit(jit: &Jit) -> i64 {
 
 /// Evaluate given AST based on reverse-polish notation / post-order traversal
 /// stack machine interpreter.
-fn eval(ast: &Ast) -> Option<i64> {
+fn eval(ast: &Ast) -> Option<Num> {
     // let post_order = post_order_traverse(ast);
     let post_order = post_order_traverse_iterative(ast);
 
@@ -313,15 +483,14 @@ fn eval(ast: &Ast) -> Option<i64> {
     for po in post_order.into_iter() {
         match po {
             AstVal::Num(n) => stack.push(n),
-            AstVal::Op(name) => {
+            AstVal::BinOp(name) => {
                 let b = stack.pop().unwrap();
                 let a = stack.pop().unwrap();
-                stack.push(match name.as_str() {
-                    "+" => a.checked_add(b)?,
-                    "-" => a.checked_sub(b)?,
-                    "*" => a.checked_mul(b)?,
-                    "/" => a.checked_div(b)?,
-                    _ => panic!("Unknown operator {}", name),
+                stack.push(match name {
+                    BinOp::Add => a.checked_add(b)?,
+                    BinOp::Sub => a.checked_sub(b)?,
+                    BinOp::Mul => a.checked_mul(b)?,
+                    BinOp::Div => a.checked_div(b)?,
                 });
             }
         }
@@ -384,13 +553,12 @@ mod tests {
                 (
                     Ast::BinOp(
                         match rng.gen_range(0..4) {
-                            0 => "+",
-                            1 => "-",
-                            2 => "*",
-                            3 => "/",
+                            0 => BinOp::Add,
+                            1 => BinOp::Sub,
+                            2 => BinOp::Mul,
+                            3 => BinOp::Div,
                             _ => panic!("Not reachable"),
-                        }
-                        .to_string(),
+                        },
                         Box::new(a),
                         Box::new(b),
                     ),
@@ -401,3 +569,5 @@ mod tests {
         }
     }
 }
+
+// Debug break: unsafe { std::arch::asm!("int3"); }
